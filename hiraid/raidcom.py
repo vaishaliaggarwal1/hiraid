@@ -21,6 +21,7 @@ from .historutils.historutils import Ldevid
 from hicciexceptions.cci_exceptions import *
 from hicciexceptions.cci_exceptions import cci_exceptions_table
 from . import __version__
+from typing import Union, Dict, List
 
 class Raidcom:
     version = __version__
@@ -870,6 +871,224 @@ class Raidcom:
             cmdreturn.view = getldev.view
         
         return cmdreturn
+    
+    def addvvolmf(self, ldev_id: str, poolid: int, cylinder: int, emulation: str='3390-A', return_ldev: bool=True, start: int=None, end: int=None, **kwargs) -> object:
+        '''
+        raidcom add ldev -ldev_id <Ldev#> -pool <ID#> -cylinder <size> -emulation <emulation type>\n
+        For creating mainframe VVOLs using cylinder size and emulation type parameters.\n
+        examples:\n
+        ldev = Raidcom.addvvolmf(ldev_id=12025, poolid=0, cylinder=1000, emulation='3390-A')\n
+        ldev = Raidcom.addvvolmf(ldev_id=12025, poolid=0, cylinder='10m', emulation='3390-A')\n
+        ldev = Raidcom.addvvolmf(ldev_id='auto', poolid=0, start=1000, end=2000, cylinder=1000, emulation='3390-A')\n
+        \n
+        Returns Cmdview():\n
+        ldev.data\n
+        ldev.view\n
+        ldev.cmd\n
+        ldev.undocmds\n
+        ldev.returncode\n
+        ldev.stderr\n
+        ldev.stdout\n
+        '''
+        def validate_cylinder(value):
+            if isinstance(value, int) and value <= 1:
+                raise ValueError(f"Cylinder must be a positive integer greater than 1, got {value}")
+            return True
+            
+        def validate_emulation(value):
+            valid_emulations = ['3390-A', '3390-3', '3390-3R', '3390-9', '3390-L', '3390-M', '3390-V']
+            if value not in valid_emulations:
+                raise ValueError(f"Invalid emulation type: {value}. Valid types are: {', '.join(valid_emulations)}")
+            return True
+    
+        cmdreturn = Cmdview(cmd="addvvolmf")
+        cmdparam, ucmdparam, cmddict, ucmddict = '', '', {}, {}
+    
+        # Define validators for each option type
+        validate = {
+            'capacity_saving': lambda x: x in ['compression', 'deduplication_compression', 'disable'],
+            'compression_acceleration': lambda x: x in ['enable', 'disable'],
+            'capacity_saving_mode': lambda x: x in ['inline', 'postprocess'],
+            'drs': lambda x: isinstance(x, bool),
+        }
+
+        # Validate emulation type
+        try:
+            validate_emulation(emulation)
+        except ValueError as e:
+            if self.asyncmode:
+                cmdreturn.returncode = 999
+                cmdreturn.stderr = str(e)
+                return cmdreturn
+            raise
+
+        # Validate and build command parameters
+        for arg, value in kwargs.items():
+            if arg in validate:
+                try:
+                    if not validate[arg](value):
+                        raise ValueError(f"Invalid value for {arg}: {value}")
+                except ValueError as e:
+                    if self.asyncmode:
+                        cmdreturn.returncode = 999
+                        cmdreturn.stderr = str(e)
+                        return cmdreturn
+                    raise
+
+            if isinstance(value, bool):
+                cmdparam = (cmdparam, f"{cmdparam} -{arg} ")[value]
+            else:
+                cmdparam = f"{cmdparam} -{arg} {value} "
+                cmddict[arg] = value
+            
+            if arg == "capacity_saving" and kwargs[arg] != "disable":
+                ucmdparam = f"-operation initialize_capacity_saving"
+                ucmddict['operation'] = 'initialize_capacity_saving'
+
+        if ldev_id == 'auto':
+            if not start or not end:
+                message = "When ldev_id is specified as 'auto' range_start and range_end ldev_ids must also be supplied"
+                if self.asyncmode:
+                    cmdreturn.returncode = 999
+                    cmdreturn.stderr = message
+                    return cmdreturn
+                raise Exception(message)
+            else:
+                cmd = f"{self.path}raidcom add ldev -ldev_id auto -ldev_range {start}-{end} -pool {poolid} -cylinder {cylinder} -emulation {emulation} {cmdparam} -request_id auto -I{self.instance} -s {self.serial}"
+                cmdreturn = self.execute(cmd=cmd, raidcom_asyncronous=False, **kwargs)
+        else:
+            cmd = f"{self.path}raidcom add ldev -ldev_id {ldev_id} -pool {poolid} -cylinder {cylinder} -emulation {emulation} {cmdparam} -request_id auto -I{self.instance} -s {self.serial}"
+            cmdreturn = self.execute(cmd=cmd, raidcom_asyncronous=False, **kwargs)
+        
+        reqid = cmdreturn.stdout.rstrip().split(' : ')
+        if not re.search(r'REQID', reqid[0]):
+            message = f"Unable to obtain REQID from stdout {cmdreturn}"
+            if self.asyncmode:
+                cmdreturn.returncode = 999
+                cmdreturn.stderr = message
+                return cmdreturn
+            else:
+                raise Exception(message)
+        
+        try:
+            getcommandstatus = self.getcommandstatus(request_id=reqid[1])
+            self.parser.getcommandstatus(getcommandstatus)
+            auto_ldev_id = getcommandstatus.data[0]['ID']
+            
+            # For undo command, we need the actual LDEV ID that was created
+            undocmd = f"{self.path}raidcom delete ldev -ldev_id {auto_ldev_id} {ucmdparam} -I{self.instance} -s {self.serial}"
+            undodef = {'undodef': 'deleteldev', 'args': {'ldev_id': auto_ldev_id}}
+            cmdreturn.undocmds.insert(0, undocmd)
+            cmdreturn.undodefs.insert(0, undodef)
+            echo = f'echo "Executing: {undocmd}"'
+            self.undocmds.insert(0, undocmd)
+            self.undocmds.insert(0, echo)
+            self.resetcommandstatus(request_id=reqid[1])
+        except Exception as e:
+            if self.asyncmode:
+                return cmdreturn
+            else:
+                raise Exception(f"Failed to create mainframe VVOL {ldev_id}, request_id {reqid[1]} error {e}")
+
+        if not kwargs.get('noexec') and return_ldev and (cmdreturn.returncode == cmdreturn.expectedreturn):
+            getldev = self.getldev(ldev_id=auto_ldev_id)
+            cmdreturn.data = getldev.data
+            cmdreturn.view = getldev.view
+        
+        return cmdreturn
+
+    def addmfvvol(self,ldev_id: str,poolid: int,cylinder: int, emulation: str, return_ldev: bool=True, **kwargs) -> object:
+        def validate_cylinder(value):
+            if not isinstance(value, int) or value <= 1:
+                raise ValueError(f"Cylinder must be a positive integer, got {value}")
+            return True
+    
+        cmdreturn = Cmdview(cmd="addmfvvol")
+        cmdparam, ucmdparam, cmddict, ucmddict = '','',{},{}
+    
+        # Define validators for each option type
+        validate = {
+            'capacity_saving': lambda x: x in ['compression', 'deduplication_compression', 'disable'],
+            'compression_acceleration': lambda x: x in ['enable', 'disable'],
+            'capacity_saving_mode': lambda x: x in ['inline', 'postprocess'],
+            'drs': lambda x: isinstance(x, bool),
+            'cylinder': validate_cylinder,
+            'emulation': lambda x: x in ['3390-A']
+            }
+
+        # Validate and build command parameters
+        for arg, value in kwargs.items():
+            if arg in validate:
+                try:
+                    if not validate[arg](value):
+                        raise ValueError(f"Invalid value for {arg}: {value}")
+                except ValueError as e:
+                    if self.asyncmode:
+                        cmdreturn.returncode = 999
+                        cmdreturn.stderr = str(e)
+                        return cmdreturn
+                    raise
+
+            if isinstance(value, bool):
+                cmdparam = (cmdparam, f"{cmdparam} -{arg} ")[value]
+            else:
+                cmdparam = f"{cmdparam} -{arg} {value} "
+                cmddict[arg] = value
+            
+            if arg == "capacity_saving" and kwargs[arg] != "disable":
+                ucmdparam = f"-operation initialize_capacity_saving"
+                ucmddict['operation'] = 'initialize_capacity_saving'
+
+        if ldev_id == 'auto':
+            if not start or not end:
+                message = f"When ldev_id is specified as 'auto' range_start and range_end ldev_ids must also be supplied"
+                if self.asyncmode:
+                    cmdreturn.returncode = 999
+                    cmdreturn.stderr = message
+                    return cmdreturn
+                raise Exception(message)
+            else:
+                cmd = f"{self.path}raidcom add ldev -ldev_id auto -ldev_range {start}-{end} -pool {poolid} -cylinder {cylinder} -emulation {emulation} {cmdparam} -request_id auto -I{self.instance} -s {self.serial}"
+                cmdreturn = self.execute(cmd=cmd,raidcom_asyncronous=False,**kwargs)
+        else:
+            cmd = f"{self.path}raidcom add ldev -ldev_id {ldev_id} -pool {poolid} -cylinder {cylinder} -emulation {emulation} {cmdparam} -request_id auto -I{self.instance} -s {self.serial}"
+            cmdreturn = self.execute(cmd=cmd,raidcom_asyncronous=False,**kwargs)
+        
+        reqid = cmdreturn.stdout.rstrip().split(' : ')
+        if not re.search(r'REQID',reqid[0]):
+            if self.asyncmode:
+                message = f"Unable to obtain REQID from stdout {cmdreturn}"
+                cmdreturn.returncode = 999
+                cmdreturn.stderr = message
+                return cmdreturn
+            else:
+                raise Exception(message)
+        try:
+            getcommandstatus = self.getcommandstatus(request_id=reqid[1])
+            self.parser.getcommandstatus(getcommandstatus)
+            auto_ldev_id = getcommandstatus.data[0]['ID']
+            undocmd = f"{self.path}raidcom delete ldev -ldev_id {auto_ldev_id} -pool {poolid} -capacity {capacity} {ucmdparam} -I{self.instance} -s {self.serial}"
+            undodef = { 'undodef': 'deleteldev', 'args':{ 'ldev_id':auto_ldev_id }}
+            cmdreturn.undocmds.insert(0, undocmd)
+            cmdreturn.undodefs.insert(0, undodef)
+            echo = f'echo "Executing: {undocmd}"'
+            self.undocmds.insert(0, undocmd)
+            self.undocmds.insert(0, echo)
+            self.resetcommandstatus(request_id=reqid[1])
+        except Exception as e:
+            if self.asyncmode:
+                return cmdreturn
+            else:
+                raise Exception(f"Failed to create ldev {ldev_id}, request_id {reqid[1]} error {e}")
+
+        if not kwargs.get('noexec') and return_ldev and (cmdreturn.returncode == cmdreturn.expectedreturn):
+            getldev = self.getldev(ldev_id=auto_ldev_id)
+            cmdreturn.data = getldev.data
+            cmdreturn.view = getldev.view
+        
+        return cmdreturn
+
+    # end
 
     def addldevnew(self,ldev_id: str,poolid: int,capacity: int, return_ldev: bool=True, start: int=None, end: int=None, **kwargs) -> object:
         '''
@@ -1651,6 +1870,177 @@ class Raidcom:
         cmdreturn.view = dict(sorted(cmdreturn.view.items()))
         return cmdreturn
 
+    def addmfvvols(self, pool_name: str, num_ldevs: int=1, ldev_prefix: str="00:10:", initial_hex: str="0A", 
+                 base_ldev_name: str="AUTO_LDEV", name_start: int=1, cylinder: int=10, 
+                 emulation: str="3390-A", return_ldevs: bool=True, max_workers: int=10, **kwargs) -> object:
+        """Add multiple mainframe volumes with specified parameters.
+        
+        Args:
+            pool_name (str): Name of the pool to create volumes in
+            num_ldevs (int): Number of volumes to create
+            ldev_prefix (str): Prefix for LDEV IDs (e.g., "00:10:")
+            initial_hex (str): Starting hex value for the last part of the LDEV ID
+            base_ldev_name (str): Base name for the LDEVs
+            name_start (int): Starting number for the LDEV name suffix
+            cylinder (int): Cylinder size for all volumes
+            emulation (str): Emulation type for all volumes (e.g., "3390-A")
+            return_ldevs (bool): Whether to return the created LDEVs
+            max_workers (int): Maximum number of concurrent workers
+            **kwargs: Additional arguments to pass to the command
+            
+        Returns:
+            object: Command result containing the created LDEVs if return_ldevs is True
+        """
+        def validate_cylinder(value):
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError("Cylinder must be a positive integer")
+            return value
+
+        def validate_emulation(value):
+            valid_emulations = ["3390-A", "3390-3", "3390-9", "3390-27", "3390-54", "3390-72"]
+            if value not in valid_emulations:
+                raise ValueError(f"Invalid emulation type. Must be one of: {', '.join(valid_emulations)}")
+            return value
+
+        # Validate inputs
+        cylinder = validate_cylinder(cylinder)
+        emulation = validate_emulation(emulation)
+
+        # Create command return object
+        cmdreturn = CmdviewConcurrent()
+        cmdreturn.cmd = "addmfvvols"
+        cmdreturn.data = []  # Initialize data attribute
+        
+        # Store successful creations and their names
+        created_ldevs = {}
+
+        # Step 1: Create volumes one by one to ensure success
+        for i in range(num_ldevs):
+            # Generate LDEV ID by incrementing the hex value
+            current_hex = hex(int(initial_hex, 16) + i)[2:].upper().zfill(2)
+            ldev_id = f"{ldev_prefix}{current_hex}"
+            
+            # Generate LDEV name with incremental number
+            ldev_name = f"{base_ldev_name}{name_start + i}"
+            
+            # Create the LDEV using addvvolmf method
+            try:
+                result = self.addvvolmf(
+                    ldev_id=ldev_id,
+                    poolid=pool_name,
+                    cylinder=cylinder,
+                    emulation=emulation,
+                    return_ldev=False,
+                    **kwargs
+                )
+                
+                # If successful, store the LDEV info for later name setting
+                if result.returncode == 0:
+                    created_ldevs[ldev_id] = ldev_name
+                    
+                    # Update the command return view
+                    cmdreturn.view[ldev_id] = {
+                        'LDEV': ldev_id,
+                        'NAME': ldev_name,
+                        'POOL': pool_name,
+                        'CYLINDER': cylinder,
+                        'EMULATION': emulation
+                    }
+                    
+                    # Update command return with result
+                    cmdreturn.stdout += result.stdout + "\n"
+                    cmdreturn.stderr += result.stderr + "\n"
+                    
+                    self.log.info(f"Successfully created LDEV {ldev_id}")
+                else:
+                    self.log.error(f"Failed to create LDEV {ldev_id}: {result.stderr}")
+            except Exception as e:
+                self.log.error(f"Error creating LDEV {ldev_id}: {str(e)}")
+                continue
+        
+        # Step 2: Now set the names for each LDEV with retry mechanism
+        # Wait for 2 seconds to allow storage system to fully process the LDEV creations
+        import time
+        time.sleep(2)
+        
+        for ldev_id, ldev_name in created_ldevs.items():
+            # Try up to 3 times to set the name
+            max_retries = 3
+            retry_delay = 2  # seconds
+            success = False
+            
+            for attempt in range(max_retries):
+                try:
+                    # Construct direct command for naming
+                    cmd = f"{self.path}raidcom modify ldev -ldev_id {ldev_id} -ldev_name {ldev_name} -I{self.instance}"
+                    result = self.execute(cmd=cmd, **kwargs)
+                    
+                    if result.returncode == 0:
+                        self.log.info(f"Successfully set name '{ldev_name}' for LDEV {ldev_id}")
+                        success = True
+                        break
+                    else:
+                        # If error is that LDEV is not installed, wait and retry
+                        if "LDEV is not installed" in result.stderr:
+                            self.log.warning(f"LDEV {ldev_id} not fully registered yet, waiting {retry_delay} seconds before retry {attempt+1}/{max_retries}")
+                            time.sleep(retry_delay)
+                            # Increase delay for next retry
+                            retry_delay += 2
+                        else:
+                            self.log.error(f"Failed to set name for LDEV {ldev_id}: {result.stderr}")
+                            break
+                except Exception as e:
+                    self.log.error(f"Error setting name for LDEV {ldev_id}: {str(e)}")
+                    break
+            
+            if not success:
+                self.log.error(f"Failed to set name for LDEV {ldev_id} after {max_retries} attempts")
+        
+        # Step 3: Get LDEV details and populate the data attribute
+        # Wait longer to ensure all operations have completed
+        time.sleep(5)
+        
+        # Populate data attribute with information about all created LDEVs
+        for ldev_id, ldev_name in created_ldevs.items():
+            # Create a basic LDEV data entry with the information we already have
+            ldev_data = {
+                'LDEV_ID': ldev_id,
+                'LDEV': ldev_id,
+                'NAME': ldev_name,
+                'POOL': pool_name,
+                'CYLINDER': str(cylinder),
+                'EMULATION': emulation,
+                'TYPE': 'MF-VOL',
+                'CUT': '-',
+                'STATUS': 'NML'
+            }
+            
+            # Try to get detailed information, but use our basic info if it fails
+            if return_ldevs:
+                try:
+                    # Get detailed information for this LDEV
+                    ldev_info = self.getldev(ldev_id=ldev_id, update_view=False, **kwargs)
+                    if hasattr(ldev_info, 'data') and ldev_info.data:
+                        # Use the detailed information
+                        ldev_data.update(ldev_info.data)
+                    elif hasattr(ldev_info, 'view') and ldev_id in ldev_info.view:
+                        # Add the view data
+                        detailed_data = ldev_info.view[ldev_id]
+                        ldev_data.update(detailed_data)
+                except Exception as e:
+                    #self.log.warning(f"Could not get detailed info for LDEV {ldev_id}, using basic info: {str(e)}")
+                    # Don't log a warning - this is expected in some cases
+                    # Just use the basic info we already have
+                    self.log.debug(f"Using basic info for LDEV {ldev_id} - detailed info unavailable")
+                    pass
+            
+            # Add the LDEV data to our data list
+            cmdreturn.data.append(ldev_data)
+        
+        # Return sorted view
+        cmdreturn.view = dict(sorted(cmdreturn.view.items()))
+        return cmdreturn
+
     def obfuscatepwd(self,cmd):
         if re.search(r' -login ',cmd):
             c = cmd.split()
@@ -1813,7 +2203,314 @@ class Raidcom:
         cmd = '{}pairresync -g {} -I{} {}'.format(self.path,group,inst,opts)
         cmdreturn = self.execute(cmd)
         return cmdreturn
-
     def verbose(self,on=True):
         self.cmdoutput = on
     '''
+
+    def addmfpvols(self, parity_grp_id: str, num_ldevs: int=1, ldev_prefix: str="00:10:", initial_hex: str="0A", 
+                 base_ldev_name: str="AUTO_LDEV", name_start: int=1, cylinder: int=10, 
+                 emulation: str="3390-A", mp_blade_id: str="0", format_ldevs: bool=True,
+                 return_ldevs: bool=True, max_workers: int=10, **kwargs) -> object:
+        """Add multiple mainframe physical volumes with specified parameters.
+        
+        Args:
+            parity_grp_id (str): ID of the parity group to create volumes in (e.g., "1-1")
+            num_ldevs (int): Number of volumes to create
+            ldev_prefix (str): Prefix for LDEV IDs (e.g., "00:10:")
+            initial_hex (str): Starting hex value for the last part of the LDEV ID
+            base_ldev_name (str): Base name for the LDEVs
+            name_start (int): Starting number for the LDEV name suffix
+            cylinder (int): Cylinder size for all volumes
+            emulation (str): Emulation type for all volumes (e.g., "3390-A")
+            mp_blade_id (str): MP blade ID for the volumes
+            format_ldevs (bool): Whether to quick format the LDEVs after creation
+            return_ldevs (bool): Whether to return the created LDEVs
+            max_workers (int): Maximum number of concurrent workers
+            **kwargs: Additional arguments to pass to the command
+            
+        Returns:
+            object: Command result containing the created LDEVs if return_ldevs is True
+        """
+        def validate_cylinder(value):
+            if not isinstance(value, int) or value <= 0:
+                raise ValueError("Cylinder must be a positive integer")
+            return value
+
+        def validate_emulation(value):
+            valid_emulations = ["3390-A", "3390-3", "3390-9", "3390-27", "3390-54", "3390-72", "3390-V"]
+            if value not in valid_emulations:
+                raise ValueError(f"Invalid emulation type. Must be one of: {', '.join(valid_emulations)}")
+            return value
+
+        # Validate inputs
+        cylinder = validate_cylinder(cylinder)
+        emulation = validate_emulation(emulation)
+
+        # Create command return object
+        cmdreturn = CmdviewConcurrent()
+        cmdreturn.cmd = "addmfpvols"
+        cmdreturn.data = []  # Initialize data attribute
+        
+        # Store successful creations and their names
+        created_ldevs = {}
+
+        # Step 1: Create volumes one by one to ensure success
+        for i in range(num_ldevs):
+            # Generate LDEV ID by incrementing the hex value
+            current_hex = hex(int(initial_hex, 16) + i)[2:].upper().zfill(2)
+            ldev_id = f"{ldev_prefix}{current_hex}"
+            
+            # Generate LDEV name with incremental number
+            ldev_name = f"{base_ldev_name}{name_start + i}"
+            
+            # Create the LDEV using parity group
+            try:
+                cmd = f"{self.path}raidcom add ldev -parity_grp_id {parity_grp_id} -ldev_id {ldev_id} -cylinder {cylinder} -emulation {emulation} -mp_blade_id {mp_blade_id} -I{self.instance}"
+                result = self.execute(cmd=cmd, **kwargs)
+                
+                # If successful, store the LDEV info for later name setting and formatting
+                if result.returncode == 0:
+                    created_ldevs[ldev_id] = ldev_name
+                    
+                    # Update the command return view
+                    cmdreturn.view[ldev_id] = {
+                        'LDEV': ldev_id,
+                        'NAME': ldev_name,
+                        'PARITY_GRP': parity_grp_id,
+                        'CYLINDER': cylinder,
+                        'EMULATION': emulation,
+                        'MP_BLADE_ID': mp_blade_id
+                    }
+                    
+                    # Update command return with result
+                    cmdreturn.stdout += result.stdout + "\n"
+                    cmdreturn.stderr += result.stderr + "\n"
+                    
+                    self.log.info(f"Successfully created LDEV {ldev_id}")
+                else:
+                    self.log.error(f"Failed to create LDEV {ldev_id}: {result.stderr}")
+            except Exception as e:
+                self.log.error(f"Error creating LDEV {ldev_id}: {str(e)}")
+                continue
+        
+        # Step 2: Check command status and reset
+        try:
+            self.getcommandstatus()
+            self.resetcommandstatus()
+        except Exception as e:
+            self.log.error(f"Error checking/resetting command status: {str(e)}")
+        
+        # Step 3: Now set the names for each LDEV with retry mechanism
+        # Wait for 2 seconds to allow storage system to fully process the LDEV creations
+        import time
+        time.sleep(2)
+        
+        for ldev_id, ldev_name in created_ldevs.items():
+            # Try up to 3 times to set the name
+            max_retries = 3
+            retry_delay = 2  # seconds
+            success = False
+            
+            for attempt in range(max_retries):
+                try:
+                    # Construct direct command for naming
+                    cmd = f"{self.path}raidcom modify ldev -ldev_id {ldev_id} -ldev_name {ldev_name} -I{self.instance}"
+                    result = self.execute(cmd=cmd, **kwargs)
+                    
+                    if result.returncode == 0:
+                        self.log.info(f"Successfully set name '{ldev_name}' for LDEV {ldev_id}")
+                        success = True
+                        break
+                    else:
+                        # If error is that LDEV is not installed, wait and retry
+                        if "LDEV is not installed" in result.stderr:
+                            self.log.warning(f"LDEV {ldev_id} not fully registered yet, waiting {retry_delay} seconds before retry {attempt+1}/{max_retries}")
+                            time.sleep(retry_delay)
+                            # Increase delay for next retry
+                            retry_delay += 2
+                        else:
+                            self.log.error(f"Failed to set name for LDEV {ldev_id}: {result.stderr}")
+                            break
+                except Exception as e:
+                    self.log.error(f"Error setting name for LDEV {ldev_id}: {str(e)}")
+                    break
+            
+            if not success:
+                self.log.error(f"Failed to set name for LDEV {ldev_id} after {max_retries} attempts")
+        
+        # Step 4: Quick format the LDEVs if requested
+        if format_ldevs and created_ldevs:
+            for ldev_id in created_ldevs:
+                try:
+                    cmd = f"{self.path}raidcom initialize ldev -ldev_id {ldev_id} -operation qfmt -I{self.instance}"
+                    result = self.execute(cmd=cmd, **kwargs)
+                    
+                    if result.returncode == 0:
+                        self.log.info(f"Successfully started quick format for LDEV {ldev_id}")
+                    else:
+                        self.log.error(f"Failed to start quick format for LDEV {ldev_id}: {result.stderr}")
+                except Exception as e:
+                    self.log.error(f"Error during quick format for LDEV {ldev_id}: {str(e)}")
+        
+        # Step 5: Get LDEV details and populate the data attribute
+        # Wait longer to ensure all operations have completed
+        time.sleep(5)
+        
+        # Populate data attribute with information about all created LDEVs
+        for ldev_id, ldev_name in created_ldevs.items():
+            # Create a basic LDEV data entry with the information we already have
+            ldev_data = {
+                'LDEV_ID': ldev_id,
+                'LDEV': ldev_id,
+                'NAME': ldev_name,
+                'PARITY_GRP': parity_grp_id,
+                'CYLINDER': str(cylinder),
+                'EMULATION': emulation,
+                'MP_BLADE_ID': mp_blade_id,
+                'TYPE': 'MF-PVOL',
+                'CUT': '-',
+                'STATUS': 'NML'
+            }
+            
+            # Try to get detailed information, but use our basic info if it fails
+            if return_ldevs:
+                try:
+                    # Get detailed information for this LDEV
+                    ldev_info = self.getldev(ldev_id=ldev_id, update_view=False, **kwargs)
+                    if hasattr(ldev_info, 'data') and ldev_info.data:
+                        # Use the detailed information
+                        ldev_data.update(ldev_info.data)
+                    elif hasattr(ldev_info, 'view') and ldev_id in ldev_info.view:
+                        # Add the view data
+                        detailed_data = ldev_info.view[ldev_id]
+                        ldev_data.update(detailed_data)
+                except Exception as e:
+                    # Don't log a warning - this is expected in some cases
+                    self.log.debug(f"Using basic info for LDEV {ldev_id} - detailed info unavailable")
+                    pass
+            
+            # Add the LDEV data to our data list
+            cmdreturn.data.append(ldev_data)
+        
+        # Return sorted view
+        cmdreturn.view = dict(sorted(cmdreturn.view.items()))
+        return cmdreturn
+        
+    def addmfdppool(self, pool_id: int, pool_name: str, ldev_id: Union[int, str, list], 
+                    cnt: str=None, grp_opt: str=None, device_grp_name: str=None, 
+                    user_threshold: str=None, return_pool: bool=True, **kwargs) -> object:
+        """Add a dynamic provisioning (DP) pool.
+        
+        Args:
+            pool_id (int): ID of the pool to create
+            pool_name (str): Name for the pool
+            ldev_id (Union[int, str, list]): LDEV ID(s) to use for the pool
+            cnt (str, optional): Count (2 to 64)
+            grp_opt (str, optional): Group option
+            device_grp_name (str, optional): Device group name or device name
+            user_threshold (str, optional): User threshold values (e.g., "70 80")
+            return_pool (bool): Whether to return pool details
+            **kwargs: Additional arguments to pass to the command
+            
+        Returns:
+            object: Command result containing the created pool if return_pool is True
+        """
+        # Create command return object
+        cmdreturn = Cmdview(cmd="addmfdppool")
+        cmdreturn.data = []  # Initialize data attribute
+        
+        # Reset command status first
+        try:
+            self.resetcommandstatus()
+        except Exception as e:
+            self.log.error(f"Error resetting command status: {str(e)}")
+        
+        # Build the base command
+        cmd = f"{self.path}raidcom add dp_pool -pool_id {pool_id} -pool_name {pool_name}"
+        
+        # Handle LDEV IDs
+        if isinstance(ldev_id, list):
+            ldev_ids = ','.join(str(ldev) for ldev in ldev_id)
+            cmd += f" -ldev_id {ldev_ids}"
+        else:
+            cmd += f" -ldev_id {ldev_id}"
+        
+        # Add optional parameters if provided
+        if cnt:
+            cmd += f" -cnt {cnt}"
+        if grp_opt:
+            cmd += f" -grp_opt {grp_opt}"
+        if device_grp_name:
+            cmd += f" -device_grp_name {device_grp_name}"
+        if user_threshold:
+            cmd += f" -user_threshold {user_threshold}"
+        
+        # Add instance ID
+        cmd += f" -I{self.instance}"
+        
+        # Execute the command
+        try:
+            result = self.execute(cmd=cmd, **kwargs)
+            
+            # Update command return with result
+            cmdreturn.stdout = result.stdout
+            cmdreturn.stderr = result.stderr
+            cmdreturn.returncode = result.returncode
+            
+            # Update command view with basic info
+            basic_pool_info = {
+                'POOL_ID': str(pool_id),
+                'POOL_NAME': pool_name,
+                'LDEV_ID': str(ldev_id) if not isinstance(ldev_id, list) else ','.join(str(ldev) for ldev in ldev_id),
+            }
+            
+            if result.returncode == 0:
+                self.log.info(f"Successfully created DP pool {pool_id} with name '{pool_name}'")
+                cmdreturn.view[str(pool_id)] = basic_pool_info
+                
+                # Add the pool info to the data attribute
+                pool_data = basic_pool_info.copy()
+                if cnt:
+                    pool_data['CNT'] = cnt
+                if grp_opt:
+                    pool_data['GRP_OPT'] = grp_opt
+                if device_grp_name:
+                    pool_data['DEVICE_GRP_NAME'] = device_grp_name
+                if user_threshold:
+                    pool_data['USER_THRESHOLD'] = user_threshold
+                
+                cmdreturn.data.append(pool_data)
+                
+                # If return_pool is True, get detailed pool information
+                if return_pool:
+                    try:
+                        # Wait to ensure pool is fully created
+                        import time
+                        time.sleep(2)
+                        
+                        # Get detailed pool information
+                        pool_info = self.getdppool(pool_id=pool_id, **kwargs)
+                        
+                        if hasattr(pool_info, 'data') and pool_info.data:
+                            # Replace our basic data with detailed info
+                            cmdreturn.data = pool_info.data
+                        elif hasattr(pool_info, 'view') and str(pool_id) in pool_info.view:
+                            # Use the view data
+                            detailed_data = pool_info.view[str(pool_id)]
+                            cmdreturn.data = [detailed_data]
+                    except Exception as e:
+                        self.log.debug(f"Using basic info for pool {pool_id} - detailed info unavailable: {str(e)}")
+            else:
+                self.log.error(f"Failed to create DP pool {pool_id}: {result.stderr}")
+        except Exception as e:
+            self.log.error(f"Error creating DP pool {pool_id}: {str(e)}")
+        
+        # Check and get command status
+        try:
+            self.getcommandstatus()
+            self.resetcommandstatus()
+        except Exception as e:
+            self.log.error(f"Error checking/resetting command status: {str(e)}")
+        
+        return cmdreturn
+        
