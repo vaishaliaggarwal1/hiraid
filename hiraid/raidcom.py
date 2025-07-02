@@ -301,7 +301,7 @@ class Raidcom:
 			self.updatestats.ldevcounts()
 		return cmdreturn
 
-	def getldevlist(self, ldevtype: str, view_keyname: str='_ldevlist', update_view=True, key='', **kwargs) -> object:
+	def (self, ldevtype: str, view_keyname: str='_ldevlist', update_view=True, key='', **kwargs) -> object:
 		'''
 		ldevtype = dp_volume | external_volume | journal | pool | parity_grp | mp_blade | defined | undefined | mapped | mapped_nvme | unmapped
 		* Some of these options require additional parameters, for example 'pool' requires pool_id = $poolid
@@ -660,7 +660,8 @@ class Raidcom:
 	# Snapshots
 
 	def getsnapshot(self, view_keyname: str='_snapshots', **kwargs) -> object:
-		cmd = f"{self.serial}raidcom get snapshot -I{self.instance} -s {self.serial} -format_time"
+		# cmd = f"{self.serial}raidcom get snapshot -I{self.instance} -s {self.serial} -format_time"
+		cmd = f"{self.path}raidcom get snapshot -I{self.instance} -s {self.serial} -format_time"
 		cmdreturn = self.execute(cmd,**kwargs)
 		self.parser.getsnapshot(cmdreturn)
 		self.updateview(self.views,{view_keyname:cmdreturn.view})
@@ -676,6 +677,12 @@ class Raidcom:
 
 	def addsnapshotgroup(self, pvol: str, svol: str, pool: str, snapshotgroup: str, **kwargs) -> object:
 		cmd = f"{self.path}raidcom add snapshot -ldev_id {pvol} {svol} -pool {pool} -snapshotgroup {snapshotgroup} -I{self.instance} -s {self.serial}"
+		cmdreturn = self.execute(cmd,**kwargs)
+		self.getcommandstatus()
+		return cmdreturn
+
+	def addsnapshotgroupcascade(self, pvol: str, svol: str, pool: str, snapshotgroup: str, mirror_id: int, snap_mode: str, **kwargs) -> object:
+		cmd = f"{self.path}raidcom add snapshot -ldev_id {pvol} -pool {pool} -snapshotgroup {snapshotgroup} -mirror_id {mirror_id} -snap_mode {snap_mode} -I{self.instance} -s {self.serial}"
 		cmdreturn = self.execute(cmd,**kwargs)
 		self.getcommandstatus()
 		return cmdreturn
@@ -1453,7 +1460,7 @@ class Raidcom:
 		undocmd = [f"{self.path}raidcom modify ldev -ldev_id {ldev_id} -capacity_saving {undo_saving} -I{self.instance} -s {self.serial}"]
 		cmdreturn = self.execute(cmd,undocmd,raidcom_asyncronous=True,**kwargs)
 		return cmdreturn
-
+  
 	def modifyhostgrp(self,port: str,host_mode: str, host_grp_name: str='', host_mode_opt: list=[], **kwargs) -> object:
 		host_mode_opt_arg = ("",f"-set_host_mode_opt {' '.join(map(str,host_mode_opt))}")[len(host_mode_opt) > 0]
 		cmd = f"{self.path}raidcom modify host_grp -port {port} {host_grp_name} -host_mode {host_mode} {host_mode_opt_arg} -I{self.instance} -s {self.serial}"
@@ -2337,20 +2344,27 @@ class Raidcom:
 			
 			if not success:
 				self.log.error(f"Failed to set name for LDEV {ldev_id} after {max_retries} attempts")
-		
+		  
 		# Step 4: Quick format the LDEVs if requested
+		time.sleep(2)
 		if format_ldevs and created_ldevs:
 			for ldev_id in created_ldevs:
-				try:
-					cmd = f"{self.path}raidcom initialize ldev -ldev_id {ldev_id} -operation qfmt -I{self.instance}"
-					result = self.execute(cmd=cmd, **kwargs)
-					
-					if result.returncode == 0:
-						self.log.info(f"Successfully started quick format for LDEV {ldev_id}")
-					else:
-						self.log.error(f"Failed to start quick format for LDEV {ldev_id}: {result.stderr}")
-				except Exception as e:
-					self.log.error(f"Error during quick format for LDEV {ldev_id}: {str(e)}")
+				for attempt in range(3):
+					try:
+						cmd = f"{self.path}raidcom initialize ldev -ldev_id {ldev_id} -operation qfmt -I{self.instance}"
+						result = self.execute(cmd=cmd, **kwargs)
+						
+						if result.returncode == 0:
+							self.log.info(f"Successfully started quick format for LDEV {ldev_id}")
+							break
+						else:
+							self.log.warning(f"Retrying quick format for LDEV {ldev_id} (attempt {attempt + 1})")
+							time.sleep(3)
+							# self.log.error(f"Failed to start quick format for LDEV {ldev_id}: {result.stderr}")
+					except Exception as e:
+						self.log.error(f"Error during quick format for LDEV {ldev_id}: {str(e)}")
+				# except Exception as e:
+				# 	self.log.error(f"Error during quick format for LDEV {ldev_id}: {str(e)}")
 		
 		# Step 5: Get LDEV details and populate the data attribute
 		# Wait longer to ensure all operations have completed
@@ -2614,7 +2628,7 @@ class Raidcom:
 			# For now, limit to a reasonable number to prevent too many attempts
 			max_ldevs = 20  # Arbitrary limit for manual range
 			self.log.info(f"Will try to create volumes using prefix {ldev_prefix} starting with hex {initial_hex}")
-		
+		 
 		# Track which LDEVs were attempted but unavailable
 		unavailable_ldevs = []
 		created_ldevs = {}
@@ -2707,7 +2721,7 @@ class Raidcom:
 		
 		# Step 2: Now set the names for each LDEV with retry mechanism
 		# Wait for 2 seconds to allow storage system to fully process the LDEV creations
-		import time
+		# import time
 		time.sleep(2)
 		
 		for ldev_id, ldev_name in created_ldevs.items():
@@ -2972,8 +2986,9 @@ class Raidcom:
 		# Step 2: Format the LDEVs if requested - FIXED IMPLEMENTATION
 		if format_ldevs and created_ldevs:
 			self.log.info(f"Starting quick format for {len(created_ldevs)} LDEVs")
-			import time
+			# import time
 			
+			time.sleep(10)
 			# Start quick format for each LDEV - similar to how addmfpvols does it
 			for ldev_id in created_ldevs:
 				try:
@@ -2997,7 +3012,6 @@ class Raidcom:
 		
 		# Step 3: Now set the names for each LDEV with retry mechanism
 		# Wait for 2 seconds to allow storage system to fully process the LDEV creations
-		import time
 		time.sleep(2)
 		
 		for ldev_id, ldev_name in created_ldevs.items():
