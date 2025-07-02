@@ -301,7 +301,7 @@ class Raidcom:
 			self.updatestats.ldevcounts()
 		return cmdreturn
 
-	def (self, ldevtype: str, view_keyname: str='_ldevlist', update_view=True, key='', **kwargs) -> object:
+	def getldevlist(self, ldevtype: str, view_keyname: str='_ldevlist', update_view=True, key='', **kwargs) -> object:
 		'''
 		ldevtype = dp_volume | external_volume | journal | pool | parity_grp | mp_blade | defined | undefined | mapped | mapped_nvme | unmapped
 		* Some of these options require additional parameters, for example 'pool' requires pool_id = $poolid
@@ -3109,4 +3109,3 @@ class Raidcom:
 		}
 		
 		return cmdreturn
-		
