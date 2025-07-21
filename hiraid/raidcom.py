@@ -244,7 +244,7 @@ class Raidcom:
 	def limitations(self):
 		for limitation in Storagecapabilities.default_limitations:
 			setattr(self,limitation,Storagecapabilities.limitations.get(self.v_id,{}).get(limitation,Storagecapabilities.default_limitations[limitation]))
-
+   
 	def getresource(self, view_keyname: str='_resource_groups', key='opt', **kwargs) -> object:
 		optcmd = (f'-key {key}','')[not key or key == '']
 		cmd = f"{self.path}raidcom get resource {optcmd} -I{self.instance} -s {self.serial}"
@@ -2444,7 +2444,7 @@ class Raidcom:
 		
 		# Handle LDEV IDs
 		if isinstance(ldev_id, list):
-			ldev_ids = ','.join(str(ldev) for ldev in ldev_id)
+			ldev_ids = ' '.join(str(ldev) for ldev in ldev_id)
 			cmd += f" -ldev_id {ldev_ids}"
 		else:
 			cmd += f" -ldev_id {ldev_id}"
@@ -2988,7 +2988,7 @@ class Raidcom:
 			self.log.info(f"Starting quick format for {len(created_ldevs)} LDEVs")
 			# import time
 			
-			time.sleep(10)
+			time.sleep(3)
 			# Start quick format for each LDEV - similar to how addmfpvols does it
 			for ldev_id in created_ldevs:
 				try:
@@ -3006,7 +3006,7 @@ class Raidcom:
 			# The status will be checked when we get the LDEV details later
 			# For now, just give some time for the format to progress
 			self.log.info(f"Waiting for quick format operations to make progress...")
-			time.sleep(30)  # Wait 30 seconds for formats to make progress
+			time.sleep(3)  # Wait 30 seconds for formats to make progress
 		else:
 			self.log.info("Quick format not requested or no LDEVs to format")
 		
@@ -3050,7 +3050,7 @@ class Raidcom:
 		# Step 4: Wait longer to ensure all operations have completed, particularly the quick format
 		# This approach mirrors the addmfpvols function which doesn't poll for format completion
 		# but allows enough time for most formats to complete
-		time.sleep(60)  # Increased wait time from 5 to 60 seconds
+		time.sleep(5)  # Increased wait time from 5 to 60 seconds
 		
 		# Store information about unavailable LDEVs
 		cmdreturn.unavailable_ldevs = unavailable_ldevs
@@ -3109,3 +3109,4 @@ class Raidcom:
 		}
 		
 		return cmdreturn
+		
