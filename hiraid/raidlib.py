@@ -892,6 +892,13 @@ class Storage:
             apiresponse = self.apis[self.useapi].addsnapshotgroup(pvol, svol, pool, snapshotgroup, optviews=optviews)
         except Exception as e:
             raise StorageException('Unable to add snapshot group {}'.format(e),Storage,self.log,self)
+    
+    def addsnapshotgroupcascade(self, pvol, svol, pool, snapshotgroup, optviews: list=[]) -> dict:
+        ''' Return add snapshot  '''
+        try:
+            apiresponse = self.apis[self.useapi].addsnapshotgroupcascade(pvol, pool, snapshotgroup, mirror_id, snap_mode, optviews=optviews)
+        except Exception as e:
+            raise StorageException('Unable to add snapshot group {}'.format(e),Storage,self.log,self)
         
     def createsnapshot(self, snapshotgroup, optviews: list=[]) -> dict:
         ''' Return create snapshot  '''
